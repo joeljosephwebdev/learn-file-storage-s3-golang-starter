@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,17 +38,26 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
-
 	const maxMemory int64 = 10 << 20
 
 	r.ParseMultipartForm(maxMemory)
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to parse form file", err)
+		return
 	}
 
-	mediaType := header.Header.Get("Content-Type")
+	headers := header.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(headers)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "failed to parse content type", err)
+		return
+	}
+
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusUnsupportedMediaType, "incorrect file type. thumbnail must be an image", err)
+		return
+	}
 
 	imageData, err := io.ReadAll(file)
 	if err != nil {
@@ -65,7 +77,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	filePath, err := saveToFile(imageData, mediaType, cfg.assetsRoot, videoIDString)
+	fileIDString := createFileID()
+	filePath, err := saveToFile(imageData, mediaType, cfg.assetsRoot, fileIDString)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to save thumbnail", err)
 		return
@@ -82,12 +95,19 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	respondWithJSON(w, http.StatusOK, video)
 }
 
-func saveToFile(data []byte, mediaType, assetsRoot, videoIDString string) (string, error) {
+func createFileID() string {
+	key := make([]byte, 32)
+	rand.Read(key)
+	base64String := base64.RawURLEncoding.EncodeToString(key)
+	return base64String
+}
+
+func saveToFile(data []byte, mediaType, assetsRoot, fileIDString string) (string, error) {
 	extension, err := extractFileExtension(mediaType)
 	if err != nil {
 		return "", fmt.Errorf("%s is not a valid content-type\n%v", mediaType, err)
 	}
-	fileName := fmt.Sprintf("%s.%s", videoIDString, extension)
+	fileName := fmt.Sprintf("%s.%s", fileIDString, extension)
 	filePath := filepath.Join(assetsRoot, fileName)
 
 	file, err := os.Create(filePath)
