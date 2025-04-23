@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -77,7 +75,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	fileIDString := createFileID()
+	fileIDString := CreateFileID()
 	filePath, err := saveToFile(imageData, mediaType, cfg.assetsRoot, fileIDString)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to save thumbnail", err)
@@ -93,13 +91,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
-}
-
-func createFileID() string {
-	key := make([]byte, 32)
-	rand.Read(key)
-	base64String := base64.RawURLEncoding.EncodeToString(key)
-	return base64String
 }
 
 func saveToFile(data []byte, mediaType, assetsRoot, fileIDString string) (string, error) {
