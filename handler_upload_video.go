@@ -77,13 +77,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "failed to create temp video file", err)
 		return
 	}
+	defer os.Remove(tmpVideo.Name()) // Remove after closing
 	defer tmpVideo.Close()           // Close first (LIFO)
-	defer os.Remove(tmpVideo.Name()) // Then remove
 
 	// Copy uploaded file to temporary file
 	_, err = io.Copy(tmpVideo, file)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "failed to write content to video file", err)
+		return
+	}
+
+	_, err = tmpVideo.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not reset file pointer", err)
 		return
 	}
 
@@ -113,22 +119,29 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		prefix = "other"
 	}
 
-	// reset tempFile's file pointer to the beginning
-	_, err = tmpVideo.Seek(0, io.SeekStart)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "failed to reset temporary video file pointer", err)
-		return
-	}
-
 	// Create a unique key for S3
 	assetPath := getAssetPath(mediaType)
 	key := filepath.Join(prefix, assetPath)
+
+	// create a processed video with the moov atom at the front
+	processedVideoPath, err := processVideoForFastStart(tmpVideo.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to process video for fast start", err)
+		return
+	}
+	defer os.Remove(processedVideoPath)
+
+	processedVideo, err := os.Open(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to open processed video", err)
+	}
+	defer processedVideo.Close()
 
 	// Set up the S3 input parameters and upload the asset
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(key),
-		Body:        tmpVideo,
+		Body:        processedVideo,
 		ContentType: aws.String(mediaType),
 	})
 	if err != nil {
@@ -144,15 +157,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
 		return
 	}
-
-	// save new video
-	video.VideoURL = &url
-	err = cfg.db.UpdateVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to update video", err)
-		return
-	}
-
 }
 
 func getVideoAspectRatio(filePath string) (string, error) {
@@ -201,6 +205,38 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	aspectRatio := getAspectCategory(width, height)
 
 	return aspectRatio, nil
+}
+
+// configure an uploaded video for faststart/streaming
+// returns the path to the
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := filePath + ".processing"
+	cmd := exec.Command(
+		"ffmpeg", "-i",
+		filePath, "-c",
+		"copy", "-movflags",
+		"faststart", "-f",
+		"mp4", outputPath,
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("error processing video: %s, %v", stderr.String(), err)
+	}
+
+	// sanity check
+	fileInfo, err := os.Stat(outputPath)
+	if err != nil {
+		return "", fmt.Errorf("could not stat processed file: %v", err)
+	}
+
+	if fileInfo.Size() == 0 {
+		return "", fmt.Errorf("processed file is empty")
+	}
+
+	return outputPath, nil
 }
 
 func getAspectCategory(width, height int) string {
